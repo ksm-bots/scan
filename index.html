@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fast Bulk Lottery Scanner v6.2</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- ZXing-C++ WebAssembly reader. Supports Data Matrix in browser. -->
+<script src="https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.1/dist/iife/reader/index.js"></script>
+<style>
+ body{background:#f8fafc;color:#0f172a}.custom-scrollbar::-webkit-scrollbar{width:6px;height:6px}.custom-scrollbar::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:4px}
+ .status-badge{backdrop-filter:blur(4px);background:rgba(255,255,255,.92)}
+ .btn-blue{background:#2563eb;color:#fff}.btn-green{background:#059669;color:#fff}.btn-disabled{background:#dbeafe;color:#93a4c2}
+ #settings-content{max-height:0;opacity:0;overflow:hidden;transition:.25s}#settings-content.open{max-height:260px;opacity:1}
+ input.field-bad{border-color:#fb7185;background:#fff1f2} input.field-ok{border-color:#cbd5e1;background:#f8fafc}
+</style>
+</head>
+<body class="p-3 md:p-6">
+<div class="max-w-6xl mx-auto space-y-5">
+ <div class="bg-white rounded-2xl border shadow-sm p-5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+  <div><h1 class="text-2xl font-black">⚡ Fast Bulk Lottery Scanner <span class="text-blue-600">v6.3 FAST</span></h1><p class="text-sm text-slate-500">PC-style Data Matrix decoding • No Gemini • No OCR guessing</p></div>
+  <div class="flex gap-2"><button id="toggle-settings" class="px-4 py-2 rounded-lg bg-slate-100 font-semibold">Settings</button><button id="clear-btn" class="px-4 py-2 rounded-lg bg-rose-50 text-rose-600 font-semibold">Reset</button></div>
+ </div>
+ <div id="settings-content" class="bg-blue-50 rounded-2xl border border-blue-100">
+  <div class="p-4 space-y-2"><label class="text-xs font-bold text-blue-800">GOOGLE APPS SCRIPT WEB APP URL</label><input id="webapp-url" class="w-full p-2 border border-blue-200 rounded-lg" placeholder="https://script.google.com/macros/s/.../exec"><div class="flex items-center gap-3"><button id="test-api-btn" class="px-3 py-2 rounded-lg bg-blue-600 text-white font-semibold">Test Connection</button><span id="api-status" class="text-xs text-slate-500">Not tested</span></div><p class="text-[10px] text-blue-600">Only GITHUB_TOKEN is required in Apps Script. No Gemini key.</p></div>
+ </div>
+ <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+  <div class="lg:col-span-7 space-y-4">
+   <div class="bg-white rounded-2xl border shadow-sm p-5">
+    <div id="drop-zone" class="w-full h-40 border-2 border-dashed border-blue-300 rounded-xl bg-blue-50/40 flex flex-col items-center justify-center relative cursor-pointer">
+     <input id="file-input" type="file" accept="image/*" multiple class="absolute inset-0 opacity-0 cursor-pointer"><div class="text-center pointer-events-none"><div class="text-3xl">📷</div><div class="font-semibold text-blue-700">Drop Images Here or Click</div><div class="text-xs text-blue-500">Up to 200 images</div></div>
+    </div>
+    <button id="scan-all-btn" class="mt-4 w-full py-3 rounded-xl font-bold btn-blue"><span id="scan-btn-text">Decode Data Matrix</span></button>
+   </div>
+   <div class="bg-white rounded-2xl border shadow-sm p-5"><div class="flex justify-between border-b pb-2 mb-3"><b>Queue</b><span id="queue-counter" class="text-xs bg-slate-100 rounded px-2 py-1">0 Items</span></div><div id="gallery-grid" class="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-[430px] overflow-auto custom-scrollbar"></div></div>
+  </div>
+  <div class="lg:col-span-5 bg-white rounded-2xl border shadow-sm p-5 flex flex-col h-[650px]">
+   <div class="flex justify-between border-b pb-2 mb-3"><b>Extracted Results</b><span id="results-counter" class="text-xs bg-green-50 text-green-700 rounded px-2 py-1">0 Total</span></div>
+   <div id="results-list" class="flex-1 overflow-auto custom-scrollbar space-y-3 pr-1"></div>
+   <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+    <button id="sync-sheet-btn" class="w-full py-3 rounded-xl font-bold bg-blue-600 text-white">📄 Sync to Sheet Only</button>
+    <button id="sync-all-btn" class="w-full py-3 rounded-xl font-bold btn-green">☁️ Sync to Sheet + GitHub</button>
+   </div>
+  </div>
+ </div>
+ <div class="bg-slate-900 rounded-2xl shadow p-4 text-slate-300 font-mono text-xs"><div id="logs" class="h-44 overflow-auto custom-scrollbar space-y-1"><div class="text-slate-500">[System] v6.3 FAST ready. Choose Sheet Only or Sheet + GitHub.</div></div></div>
+</div>
+<script>
+(() => {
+ 'use strict';
+ const MAX_FILES=200, REQUIRED_BACKEND_VERSION='6.3.0';
+ let tickets=[];
+ const $=id=>document.getElementById(id);
+ const fileInput=$('file-input'),dropZone=$('drop-zone'),gallery=$('gallery-grid'),results=$('results-list'),scanBtn=$('scan-all-btn'),sheetBtn=$('sync-sheet-btn'),syncBtn=$('sync-all-btn'),webUrl=$('webapp-url');
+ const DM_RE=/(?<year>\d{2})-(?<period>\d{2})-(?<set>\d{2})-(?<number>\d{6})(?:-(?<suffix>\d{4}))?/;
+ const saved=localStorage.getItem('lotteryWebAppUrl'); if(saved) webUrl.value=saved;
+ $('toggle-settings').onclick=()=> $('settings-content').classList.toggle('open');
+ webUrl.onchange=()=>localStorage.setItem('lotteryWebAppUrl',webUrl.value.trim());
+ function esc(v){return String(v??'').replace(/[&<>\'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+ function log(m,type='info'){let cls=type==='error'?'text-rose-400':type==='success'?'text-emerald-400':type==='action'?'text-blue-400':'text-slate-300'; $('logs').insertAdjacentHTML('beforeend',`<div class="${cls}">[${new Date().toLocaleTimeString()}] ${esc(m)}</div>`);$('logs').scrollTop=$('logs').scrollHeight;}
+ async function postApi(payload){const u=webUrl.value.trim();if(!u)throw Error('Missing Web App URL');const r=await fetch(u,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload),redirect:'follow'});const txt=await r.text();let d;try{d=JSON.parse(txt)}catch{throw Error('Invalid Apps Script response: '+txt.slice(0,150))}if(d.status!=='success')throw Error(d.message||'Server error');return d;}
+ $('test-api-btn').onclick=async()=>{try{localStorage.setItem('lotteryWebAppUrl',webUrl.value.trim());const d=await postApi({action:'ping'});if(d.backendVersion!==REQUIRED_BACKEND_VERSION)throw Error(`Redeploy Code.gs as NEW VERSION. Need ${REQUIRED_BACKEND_VERSION}, got ${d.backendVersion||'unknown'}`);$('api-status').textContent='✅ Connected v'+d.backendVersion;$('api-status').className='text-xs text-emerald-600 font-semibold';log('Apps Script connected v'+d.backendVersion,'success')}catch(e){$('api-status').textContent='❌ '+e.message;$('api-status').className='text-xs text-rose-600 font-semibold';log(e.message,'error')}};
+ ['dragenter','dragover','dragleave','drop'].forEach(n=>dropZone.addEventListener(n,e=>{e.preventDefault();e.stopPropagation()}));dropZone.addEventListener('drop',e=>handleFiles(e.dataTransfer.files));fileInput.onchange=e=>{handleFiles(e.target.files);fileInput.value=''};
+ async function fileToData(file){return new Promise((res,rej)=>{const fr=new FileReader();fr.onerror=()=>rej(Error('Read failed'));fr.onload=e=>{const im=new Image();im.onerror=()=>rej(Error('Invalid image'));im.onload=()=>{const max=1400,s=Math.min(1,max/im.width);const c=document.createElement('canvas');c.width=Math.round(im.width*s);c.height=Math.round(im.height*s);c.getContext('2d').drawImage(im,0,0,c.width,c.height);res(c.toDataURL('image/jpeg',.9))};im.src=e.target.result};fr.readAsDataURL(file)})}
+ async function handleFiles(list){for(const f of Array.from(list).slice(0,MAX_FILES-tickets.length)){if(!f.type.startsWith('image/'))continue;try{const preview=await fileToData(f);tickets.push({id:(crypto.randomUUID?.()||Date.now()+Math.random()),fileName:f.name,previewUrl:preview,base64:preview.split(',')[1],scanStatus:'pending',syncStatus:'pending',sheetSaved:false,githubSaved:false,extractedData:null,imageUrl:'',method:''})}catch(e){log(f.name+': '+e.message,'error')}}updateUI()}
+ function valid2(v){return /^\d{2}$/.test(v)} function valid4(v){return /^\d{4}$/.test(v)} function valid6(v){return /^\d{6}$/.test(v)}
+ function recalc(t){const d=t.extractedData;if(!d)return;d.formattedString=`${d.yy||'??'}-${d.period||'??'}-${d.set||'??'}-${d.number||'??????'}-${d.suffix||'????'}`}
+ function isComplete(d){return d&&valid2(d.yy)&&valid2(d.period)&&valid2(d.set)&&valid6(d.number)&&valid4(d.suffix)}
+ function updateUI(){
+  $('queue-counter').textContent=tickets.length+' Items';
+  $('results-counter').textContent=tickets.filter(t=>t.scanStatus==='success').length+' Total';
+  const pend=tickets.some(t=>['pending','error'].includes(t.scanStatus));
+  scanBtn.disabled=!pend;
+  scanBtn.className='mt-4 w-full py-3 rounded-xl font-bold '+(pend?'btn-blue':'btn-disabled');
+
+  const canSheet=tickets.some(t=>t.scanStatus==='success'&&!t.sheetSaved&&isComplete(t.extractedData));
+  const canFull=tickets.some(t=>t.scanStatus==='success'&&!t.githubSaved&&isComplete(t.extractedData));
+  sheetBtn.disabled=!canSheet;
+  sheetBtn.className='w-full py-3 rounded-xl font-bold '+(canSheet?'bg-blue-600 text-white':'bg-blue-100 text-blue-300 cursor-not-allowed');
+  syncBtn.disabled=!canFull;
+  syncBtn.className='w-full py-3 rounded-xl font-bold '+(canFull?'btn-green':'bg-emerald-100 text-emerald-300 cursor-not-allowed');
+
+  gallery.innerHTML=tickets.map(t=>`<div class="relative rounded-xl overflow-hidden border bg-slate-100 aspect-[4/3]"><img src="${t.previewUrl}" class="w-full h-full object-cover"><div class="absolute top-2 left-2 status-badge rounded px-2 py-1 text-[10px] font-bold">${t.scanStatus==='success'?'✅':t.scanStatus==='scanning'?'⏳':t.scanStatus==='error'?'❌':'🕒'} SCAN</div></div>`).join('');
+
+  results.innerHTML=tickets.filter(t=>t.scanStatus==='success').map(t=>{
+   const d=t.extractedData||{},complete=isComplete(d);
+   let badge='PENDING SYNC', badgeClass='text-orange-600';
+   if(t.githubSaved){badge='SHEET + GITHUB ✅';badgeClass='text-emerald-600'}
+   else if(t.sheetSaved){badge='SHEET ONLY ✅';badgeClass='text-blue-600'}
+   else if(t.syncStatus==='syncing'){badge='SYNCING...';badgeClass='text-blue-600'}
+   else if(t.syncStatus==='error'){badge='SYNC ERROR';badgeClass='text-rose-600'}
+   return `<div class="p-3 border rounded-xl shadow-sm"><div class="flex justify-between gap-2"><div class="font-mono text-xl font-black tracking-widest">${esc(d.number||'')}</div><span class="text-[9px] font-bold ${badgeClass}">${esc(badge)}</span></div><div class="text-[9px] text-blue-600 font-semibold mb-2">${esc(t.method||'')}</div><div class="grid grid-cols-5 gap-1 text-center">${[['yy','YY',2],['period','Period',2],['set','Set',2],['number','Number',6],['suffix','Suffix',4]].map(([k,l,n])=>`<label class="text-[9px] text-slate-500">${l}<input data-id="${t.id}" data-field="${k}" maxlength="${n}" value="${esc(d[k]||'')}" class="ticket-field mt-1 w-full rounded border px-1 py-1 text-[10px] font-mono text-center ${String(d[k]||'').length===n?'field-ok':'field-bad'}"></label>`).join('')}</div><div class="mt-2 text-[10px] font-mono text-slate-600">${esc(d.formattedString||'')}</div>${!complete?'<div class="mt-1 text-[9px] text-rose-600">⚠ Data Matrix not complete. Correct red fields before sync.</div>':''}</div>`
+  }).join('');
+
+  document.querySelectorAll('.ticket-field').forEach(el=>el.oninput=()=>{
+   const t=tickets.find(x=>String(x.id)===el.dataset.id);if(!t)return;
+   const n={yy:2,period:2,set:2,number:6,suffix:4}[el.dataset.field];
+   t.extractedData[el.dataset.field]=el.value.replace(/\D/g,'').slice(0,n);
+   recalc(t);
+   // Edited data should be saved again. If GitHub was already saved, the image remains saved.
+   t.sheetSaved=false;
+   updateUI();
+  })
+ }
+ function loadImg(url){return new Promise((res,rej)=>{const im=new Image();im.onload=()=>res(im);im.onerror=rej;im.src=url})}
+ function rotateCanvas(src,angle){const c=document.createElement('canvas'),ctx=c.getContext('2d');if(angle===90||angle===270){c.width=src.height;c.height=src.width}else{c.width=src.width;c.height=src.height}ctx.translate(c.width/2,c.height/2);ctx.rotate(angle*Math.PI/180);ctx.drawImage(src,-src.width/2,-src.height/2);return c}
+ function cropCanvas(src,x1r,y1r,x2r,y2r,scale=1){const x=Math.floor(src.width*x1r),y=Math.floor(src.height*y1r),w=Math.max(1,Math.floor(src.width*(x2r-x1r))),h=Math.max(1,Math.floor(src.height*(y2r-y1r)));const c=document.createElement('canvas');c.width=Math.round(w*scale);c.height=Math.round(h*scale);c.getContext('2d').drawImage(src,x,y,w,h,0,0,c.width,c.height);return c}
+ function variantCanvas(src,type,scale=1){const c=document.createElement('canvas');c.width=Math.round(src.width*scale);c.height=Math.round(src.height*scale);const ctx=c.getContext('2d');ctx.drawImage(src,0,0,c.width,c.height);if(type==='color')return c;let id=ctx.getImageData(0,0,c.width,c.height),p=id.data;for(let i=0;i<p.length;i+=4){let g=.299*p[i]+.587*p[i+1]+.114*p[i+2];if(type==='contrast')g=Math.max(0,Math.min(255,(g-128)*1.65+128));if(type==='threshold')g=g>145?255:0;if(type==='invert')g=255-g;p[i]=p[i+1]=p[i+2]=g}ctx.putImageData(id,0,0);return c}
+ async function readDM(imageLike){if(!window.ZXingWASM?.readBarcodes)throw Error('ZXing-WASM did not load. Check internet/CDN.');const ctx=imageLike.getContext('2d');const id=ctx.getImageData(0,0,imageLike.width,imageLike.height);const r=await ZXingWASM.readBarcodes(id,{formats:['DataMatrix'],tryHarder:true,tryRotate:true,tryInvert:true,maxNumberOfSymbols:4});return (r||[]).map(x=>String(x.text||'').trim()).filter(Boolean)}
+ function parseDM(text){const m=String(text||'').match(DM_RE);if(!m)return null;const g=m.groups;return {yy:g.year,period:g.period,set:g.set,number:g.number,suffix:g.suffix||'',formattedString:`${g.year}-${g.period}-${g.set}-${g.number}-${g.suffix||'????'}`,raw:text}}
+ function filenameNumber(name){const m=String(name).replace(/\.[^.]+$/,'').match(/(?:^|\D)(\d{6})(?:\D|$)/)||String(name).match(/(\d{6})/);return m?m[1]:''}
+ async function decodePcStyle(t){
+  const im=await loadImg(t.previewUrl);
+  const base=document.createElement('canvas');
+  base.width=im.naturalWidth;base.height=im.naturalHeight;
+  base.getContext('2d').drawImage(im,0,0);
+
+  const rotations=[0,90,180,270];
+  const boxes=[[.34,.10,.58,.46],[.32,.08,.60,.48],[.35,.12,.57,.44]];
+  const votes=new Map(),examples=new Map();let attempts=0;
+
+  const record=async c=>{
+    attempts++;
+    try{
+      for(const text of await readDM(c)){
+        const p=parseDM(text); if(!p) continue;
+        const key=p.formattedString;
+        votes.set(key,(votes.get(key)||0)+1); examples.set(key,p);
+        if((votes.get(key)||0)>=2)return p;
+      }
+    }catch{}
+    return null;
+  };
+
+  // Stage 1: fast variants first (same idea as the desktop app).
+  for(const ang of rotations){
+    const rot=rotateCanvas(base,ang);
+    for(const b of boxes){
+      const crop=cropCanvas(rot,...b,1);
+      for(const [type,scale] of [['color',1],['gray',1],['gray',2]]){
+        const stable=await record(variantCanvas(crop,type,scale));
+        if(stable)return {data:stable,method:`Data Matrix FAST (${ang}°, ${votes.get(stable.formattedString)} confirmations)`,attempts};
+      }
+    }
+    const stable=await record(variantCanvas(rot,'gray',1));
+    if(stable)return {data:stable,method:`Data Matrix whole image (${ang}°)`,attempts};
+  }
+
+  // Stage 2: heavy rescue only for difficult images.
+  for(const ang of rotations){
+    const rot=rotateCanvas(base,ang);
+    for(const b of boxes.slice(0,2)){
+      const crop=cropCanvas(rot,...b,1);
+      for(const [type,scale] of [['contrast',2],['threshold',3],['invert',2]]){
+        const stable=await record(variantCanvas(crop,type,scale));
+        if(stable)return {data:stable,method:`Data Matrix RESCUE (${ang}°, ${votes.get(stable.formattedString)} confirmations)`,attempts};
+      }
+    }
+  }
+
+  if(votes.size){
+    const ranked=[...votes.entries()].sort((a,b)=>b[1]-a[1]);
+    const p=examples.get(ranked[0][0]);
+    return {data:p,method:`Data Matrix single read • REVIEW (${ranked[0][1]} vote)`,attempts};
+  }
+  const num=filenameNumber(t.fileName);
+  return {data:{yy:'69',period:'',set:'',number:num,suffix:'',formattedString:`69-??-??-${num||'??????'}-????`,raw:''},method:'Data Matrix not decoded • filename fallback',attempts};
+ }
+
+ async function runPool(items,worker,limit=3){
+   let next=0;
+   const runners=Array.from({length:Math.min(limit,items.length)},async()=>{
+     while(true){
+       const i=next++;
+       if(i>=items.length)return;
+       await worker(items[i],i);
+     }
+   });
+   await Promise.all(runners);
+ }
+
+ scanBtn.onclick=async()=>{
+   const list=tickets.filter(t=>['pending','error'].includes(t.scanStatus));
+   if(!list.length)return;
+   scanBtn.disabled=true;
+   let done=0;
+   $('scan-btn-text').textContent=`Data Matrix 0/${list.length}`;
+   await runPool(list,async(t)=>{
+     t.scanStatus='scanning';updateUI();
+     try{
+       const r=await decodePcStyle(t);
+       t.extractedData=r.data;t.method=r.method;t.scanStatus='success';
+       log(`${t.fileName}: ${r.data.formattedString} | ${r.method} | ${r.attempts} attempts`,isComplete(r.data)?'success':'error');
+     }catch(e){
+       t.scanStatus='error';log(`Scan Error ${t.fileName}: ${e.message}`,'error');
+     }
+     done++; $('scan-btn-text').textContent=`Data Matrix ${done}/${list.length}`; updateUI();
+   },3);
+   $('scan-btn-text').textContent='Decode Data Matrix';updateUI();
+ };
+
+ function batchTicketPayload(t,withImage){
+   const x={id:String(t.id),filename:t.extractedData.number,formattedString:t.extractedData.formattedString};
+   if(withImage)x.base64=t.base64;
+   return x;
+ }
+
+ async function postBatch(action,items){
+   return await postApi({action,tickets:items});
+ }
+
+ sheetBtn.onclick=async()=>{
+   const list=tickets.filter(t=>t.scanStatus==='success'&&!t.sheetSaved&&isComplete(t.extractedData));
+   if(!list.length)return;
+   sheetBtn.disabled=true;
+   list.forEach(t=>{t.syncStatus='syncing'});updateUI();
+   try{
+     const d=await postBatch('sheetOnlyBatch',list.map(t=>batchTicketPayload(t,false)));
+     const byId=new Map((d.results||[]).map(r=>[String(r.id),r]));
+     for(const t of list){
+       const r=byId.get(String(t.id));
+       if(r?.sheetSaved){t.sheetSaved=true;t.syncStatus='sheet-only'}
+       else {t.syncStatus='error'}
+     }
+     log(`FAST Sheet sync: ${d.savedCount||0}/${list.length} tickets saved in one request ✅`,'success');
+   }catch(e){
+     list.forEach(t=>t.syncStatus='error');
+     log('FAST Sheet batch failed: '+e.message,'error');
+   }
+   updateUI();
+ };
+
+ syncBtn.onclick=async()=>{
+   const list=tickets.filter(t=>t.scanStatus==='success'&&!t.githubSaved&&isComplete(t.extractedData));
+   if(!list.length)return;
+   syncBtn.disabled=true;
+   list.forEach(t=>{t.syncStatus='syncing'});updateUI();
+
+   const CHUNK=10;
+   let completed=0;
+   for(let offset=0;offset<list.length;offset+=CHUNK){
+     const chunk=list.slice(offset,offset+CHUNK);
+     try{
+       const d=await postBatch('syncBatch',chunk.map(t=>batchTicketPayload(t,true)));
+       const byId=new Map((d.results||[]).map(r=>[String(r.id),r]));
+       for(const t of chunk){
+         const r=byId.get(String(t.id));
+         if(r){
+           t.sheetSaved=!!r.sheetSaved;t.githubSaved=!!r.githubSaved;
+           t.imageUrl=r.imageUrl||'';
+           t.syncStatus=t.githubSaved?'success':(t.sheetSaved?'partial':'error');
+         }else t.syncStatus='error';
+       }
+       completed+=chunk.length;
+       log(`FAST Sheet + GitHub: ${completed}/${list.length} processed`,'success');
+     }catch(e){
+       chunk.forEach(t=>t.syncStatus='error');
+       log('FAST sync batch failed: '+e.message,'error');
+     }
+     updateUI();
+   }
+ };
+ $('clear-btn').onclick=()=>{if(confirm('Clear current session?')){tickets=[];$('logs').innerHTML='<div class="text-slate-500">[System] v6.3 FAST ready.</div>';updateUI()}};
+ updateUI();
+})();
+</script>
+</body></html>
